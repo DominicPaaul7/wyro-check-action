@@ -1,0 +1,158 @@
+name: "Wyro architecture check"
+description: "Fail a pull request that introduces a new architecture violation — an unauthenticated route reaching a table, sensitive data flowing to a third party."
+author: "Wyro"
+
+branding:
+  icon: git-merge
+  color: purple
+
+inputs:
+  path:
+    description: "Directory to check, relative to the workspace."
+    required: false
+    default: "."
+  config:
+    description: "Config file. Defaults to wyro.json, then .wyro/config.json, inside `path`."
+    required: false
+  baseline:
+    description: >
+      Ledger of findings that already existed when enforcement was switched on.
+      Only findings NOT in it fail the build. Defaults to .wyro/baseline.json
+      when that file exists. Generate it with `wyro-check . --update-baseline`.
+    required: false
+  fail-on:
+    description: "Which severity fails the build: error, warn, or never."
+    required: false
+    default: "error"
+  max-warnings:
+    description: "Warning budget across the whole repository. Empty means unlimited."
+    required: false
+  allow-unreadable:
+    description: >
+      Pass when nothing in `path` parses as a backend. Off by default: a green
+      tick that means "we understood none of your code" is the worst output this
+      action can produce.
+    required: false
+    default: "false"
+  token:
+    description: >
+      A Wyro project token. With one, the project's policy in Wyro governs this
+      run and the repository cannot weaken it — see the `wyro-central-policy`
+      note in the job summary. Without one, the check still runs, using the
+      repository's own wyro.json.
+    required: false
+  checksum:
+    description: >
+      Pin the expected SHA-256 of the checker. Left empty, the action verifies
+      the download against the digest published beside it, which catches a
+      truncated transfer but — honestly — not a compromised server, since both
+      come from the same host. Supply-chain-sensitive teams should pin.
+    required: false
+  source:
+    description: "Where to fetch the checker from. Override only for self-hosting."
+    required: false
+    default: "https://wyro.in"
+
+outputs:
+  exit-code:
+    description: "0 pass · 1 new findings · 2 nothing readable · 3 gate misconfigured"
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    # Pinned to the Node the bundle targets rather than whatever the runner
+    # happens to have. A check that behaves differently on two runners is a
+    # check people stop believing.
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    # The digest is fetched first and separately because it is ~90 bytes and it
+    # is the cache key. On the second and every later run of a given checker
+    # version, the 10mb download does not happen at all.
+    - id: digest
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${{ inputs.checksum }}" ]; then
+          echo "sha=${{ inputs.checksum }}" >> "$GITHUB_OUTPUT"
+          echo "pinned=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        sha=""
+        for attempt in 1 2 3; do
+          if sha=$(curl -fsSL --max-time 20 "${{ inputs.source }}/wyro-check.js.sha256" | awk '{print $1}'); then
+            break
+          fi
+          echo "wyro-check: could not reach ${{ inputs.source }} (attempt $attempt/3), retrying…"
+          sleep 5
+          sha=""
+        done
+        if [ -z "$sha" ]; then
+          echo "::error title=wyro-check::Could not fetch the checker from ${{ inputs.source }}. The gate did not run."
+          exit 3
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "pinned=false" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/wyro/wyro-check.js
+        key: wyro-check-${{ steps.digest.outputs.sha }}
+
+    - name: Fetch the checker
+      shell: bash
+      run: |
+        set -euo pipefail
+        dest="$HOME/.cache/wyro/wyro-check.js"
+        mkdir -p "$(dirname "$dest")"
+
+        if [ ! -f "$dest" ]; then
+          curl -fsSL --max-time 120 --retry 3 --retry-delay 5 \
+            "${{ inputs.source }}/wyro-check.js" -o "$dest" || {
+              echo "::error title=wyro-check::Could not download the checker from ${{ inputs.source }}. The gate did not run."
+              exit 3
+            }
+        fi
+
+        # Verified whether it came from the network or the cache. A poisoned
+        # cache entry is a real thing, and it is the one place an attacker with
+        # write access to a fork's cache could otherwise swap the gate out.
+        actual=$(sha256sum "$dest" | awk '{print $1}')
+        if [ "$actual" != "${{ steps.digest.outputs.sha }}" ]; then
+          rm -f "$dest"
+          echo "::error title=wyro-check::Checksum mismatch — expected ${{ steps.digest.outputs.sha }}, got $actual. The gate did not run."
+          exit 3
+        fi
+
+    - id: check
+      shell: bash
+      env:
+        WYRO_TOKEN: ${{ inputs.token }}
+      run: |
+        set -o pipefail
+        args=("${{ inputs.path }}" --github)
+        [ -n "${{ inputs.config }}" ]       && args+=(--config "${{ inputs.config }}")
+        [ -n "${{ inputs.baseline }}" ]     && args+=(--baseline "${{ inputs.baseline }}")
+        [ -n "${{ inputs.fail-on }}" ]      && args+=(--fail-on "${{ inputs.fail-on }}")
+        [ -n "${{ inputs.max-warnings }}" ] && args+=(--max-warnings "${{ inputs.max-warnings }}")
+        [ "${{ inputs.allow-unreadable }}" = "true" ] && args+=(--allow-unreadable)
+        [ "${{ inputs.source }}" != "https://wyro.in" ] && args+=(--api "${{ inputs.source }}")
+
+        set +e
+        node "$HOME/.cache/wyro/wyro-check.js" "${args[@]}"
+        code=$?
+        set -e
+
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+
+        # Exit code 3 is the gate itself being broken — a corrupt baseline, a
+        # typo in wyro.json, a revoked token. It is surfaced separately from 1
+        # because a team whose gate has been broken for three weeks otherwise
+        # sees the same red X as a team catching real problems, and stops
+        # reading either.
+        if [ $code -eq 3 ]; then
+          echo "::error title=wyro-check::The architecture gate is misconfigured — it did not run. See the log above."
+        fi
+        exit $code
