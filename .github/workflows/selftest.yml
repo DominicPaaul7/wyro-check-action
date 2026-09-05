@@ -1,0 +1,62 @@
+# Proves the action does the two things it claims, on every push.
+#
+# An action that is never exercised is a README. These jobs run the real
+# published path — download from wyro.in, verify the digest, check a fixture —
+# and assert on the exit code, including the case that matters most: a finding
+# recorded in a baseline must NOT fail a build.
+name: selftest
+
+on:
+  push:
+  pull_request:
+  # The checker is fetched from wyro.in at run time, so this action can break
+  # without a commit here. A daily run is what notices.
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  catches-a-violation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        continue-on-error: true
+        uses: ./
+        with:
+          path: fixtures/leaky
+      - name: Assert it failed with exit 1
+        run: |
+          got="${{ steps.check.outputs.exit-code }}"
+          [ "$got" = "1" ] || { echo "expected exit 1, got '$got'"; exit 1; }
+          echo "✓ unauthenticated route reaching a payments table was caught"
+
+  baseline-lets-known-findings-through:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record the fixture's existing findings
+        run: |
+          curl -fsSL https://wyro.in/wyro-check.js -o /tmp/wyro-check.js
+          node /tmp/wyro-check.js fixtures/clean --update-baseline
+      - uses: ./
+        with:
+          path: fixtures/clean
+      - run: echo "✓ a finding in the baseline does not fail the build"
+
+  refuses-to-pass-an-unreadable-directory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        continue-on-error: true
+        uses: ./
+        with:
+          path: .github
+      - name: Assert it failed with exit 2, not 0
+        run: |
+          got="${{ steps.check.outputs.exit-code }}"
+          [ "$got" = "2" ] || { echo "expected exit 2, got '$got'"; exit 1; }
+          echo "✓ zero findings from an unparsed directory is not a pass"
