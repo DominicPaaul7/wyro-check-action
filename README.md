@@ -9,12 +9,29 @@ a public endpoint with no validator or rate limiter.
 name: architecture
 on: [pull_request]
 
+permissions:
+  contents: read
+  pull-requests: write   # for the verdict comment
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: DominicPaaul7/wyro-check-action@v1
+```
+
+Findings land as annotations on the lines that caused them, as a job summary,
+and as one comment on the pull request that is rewritten on every push, so it
+always shows the latest result and never a stack of old ones. Without
+`pull-requests: write`, or on a pull request from a fork (whose token is always
+read-only), the run notes it once and the verdict is unchanged.
+
+On a public repository the comment also offers a README badge until the README
+has one. It shows the default branch's result and links to its public report:
+
+```md
+[![wyro architecture](https://wyro.in/api/badge/OWNER/REPO)](https://wyro.in/scan/OWNER/REPO)
 ```
 
 ## Adopting it on a repository that already exists
@@ -50,6 +67,8 @@ reformatting a file or moving it does not resurrect a finding you accepted.
 | `max-warnings` | | Warning budget across the repository. |
 | `allow-unreadable` | `false` | Pass when nothing parses as a backend. See below. |
 | `token` | | A Wyro project token — see *Central policy*. |
+| `comment` | `true` | Post the verdict on the pull request as one sticky comment. |
+| `github-token` | `${{ github.token }}` | Token that writes the comment. |
 | `checksum` | | Pin the expected SHA-256 of the checker. |
 | `source` | `https://wyro.in` | Where to fetch the checker from. |
 

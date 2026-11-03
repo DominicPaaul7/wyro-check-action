@@ -41,6 +41,18 @@ inputs:
       note in the job summary. Without one, the check still runs, using the
       repository's own wyro.json.
     required: false
+  comment:
+    description: >
+      Post the verdict on the pull request as one comment, rewritten on every
+      push. Needs `permissions: pull-requests: write` on the job; without it, or
+      on a pull request from a fork, the run says so once and the verdict is
+      unchanged.
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used to write the pull-request comment."
+    required: false
+    default: ${{ github.token }}
   checksum:
     description: >
       Pin the expected SHA-256 of the checker. Left empty, the action verifies
@@ -130,6 +142,8 @@ runs:
       shell: bash
       env:
         WYRO_TOKEN: ${{ inputs.token }}
+        WYRO_GITHUB_TOKEN: ${{ inputs.github-token }}
+        WYRO_COMMENT: ${{ inputs.comment }}
       run: |
         set -o pipefail
         args=("${{ inputs.path }}" --github)
